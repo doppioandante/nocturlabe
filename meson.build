@@ -9,7 +9,7 @@ klu = cpp.find_library('klu', required: true)
 cppad = dependency('cppad', required: true)
 
 install_headers('nocturlabe.hpp', subdir: 'nocturlabe.hpp')
-nocturlabe = declare_dependency(
+nocturlabe_dep = declare_dependency(
   include_directories : include_directories('/usr/include/suitesparse/', '.'),
   dependencies : [sundials_ida, sundials_nvecserial, sundials_nvecmanyvector, klu, sundials_sunlinsolklu, cppad],
 )

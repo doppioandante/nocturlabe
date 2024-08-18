@@ -24,37 +24,52 @@ public:
 
     template <typename T>
     using ODEFunction = std::function<
-        std::vector<T>(const DAEParams* params, const std::vector<T>&, const std::vector<T>&)>;
+        std::vector<T>(
+            const DAEParams* params,
+            const std::vector<T>&,
+            const std::vector<T>&,
+            const std::vector<T>&
+        )>;
 
     template <typename T>
     using ALGFunction = std::function<
-        std::vector<T>(const DAEParams* params, const std::vector<T>&, const std::vector<T>&)>;
+        std::vector<T>(
+            const DAEParams* params,
+            const std::vector<T>&,
+            const std::vector<T>&,
+            const std::vector<T>&
+        )>;
 
 private:
     struct IDAUserData {
-        CppAD::ADFun<realtype> F;
+        CppAD::ADFun<Scalar> F;
         ODEFunction<Scalar> f;
         ALGFunction<Scalar> g;
         const DAEParams* params;
+        std::vector<Scalar>* inputs;
         int n;
         int m;
         int p;
+        int q;
     };
 
 public:
-    IDASolver(size_t num_diffeq, size_t num_algeq, size_t num_algvar,
-              ODEFunction<Scalar> f, ALGFunction<Scalar> g,
-              ODEFunction<AD<Scalar>> f_ad, ALGFunction<AD<Scalar>> g_ad);
+    IDASolver(size_t num_diffeq, size_t num_algeq, size_t num_algvar, size_t num_inputs,
+                  ODEFunction<Scalar> f, ALGFunction<Scalar> g,
+                  ODEFunction<AD<Scalar>> f_ad, ALGFunction<AD<Scalar>> g_ad);
     ~IDASolver();
 
     void set_params(const DAEParams* params);
     void set_avtol(const std::vector<realtype> avtol);
     void set_rtol(realtype rtol);
 
-    void set_initial_state(const std::vector<realtype>& x0);
+    void set_initial_state(const std::vector<realtype>& x0, const std::vector<realtype>& u0);
     void start(realtype t0, realtype first_step, bool fix_initial_conditions = true);
 
+    void set_input(const std::vector<realtype>& u0);
     int do_step(realtype step, realtype& tret);
+
+    void get_state(std::vector<realtype>& x, std::vector<realtype>& z) const;
 
 private:
     static int fres(realtype tres, N_Vector yy, N_Vector yp, N_Vector rr, void* user_data);
@@ -64,9 +79,10 @@ private:
                           N_Vector tempv1, N_Vector tempv2, N_Vector tempv3);
 
 private:
-    size_t num_diffeq_, num_algeq_, num_algvar_, N_, M_;
+    size_t num_diffeq_, num_algeq_, num_algvar_, num_inputs_, N_, M_;
     realtype rtol_;
     const DAEParams* params_;
+    std::vector<realtype> u;
 
     IDAUserData UserData_;
 
@@ -86,11 +102,11 @@ private:
 
 template <typename DAEParams, typename Scalar>
 IDASolver<DAEParams, Scalar>::IDASolver(
-    size_t num_diffeq, size_t num_algeq, size_t num_algvar,
+    size_t num_diffeq, size_t num_algeq, size_t num_algvar, size_t num_inputs,
     ODEFunction<Scalar> f, ALGFunction<Scalar> g,
     ODEFunction<AD<Scalar>> f_ad, ODEFunction<AD<Scalar>> g_ad
 )
-    : num_diffeq_(num_diffeq), num_algeq_(num_algeq), num_algvar_(num_algvar),
+    : num_diffeq_(num_diffeq), num_algeq_(num_algeq), num_algvar_(num_algvar), num_inputs_(num_inputs),
       N_(num_algvar + num_diffeq), M_(num_algeq + num_diffeq), rtol_(RCONST(1e-6)), params_(nullptr),
       f_(f), g_(g),
       f_sym(f_ad), g_sym(g_ad)
@@ -154,8 +170,10 @@ void IDASolver<DAEParams, Scalar>::set_rtol(realtype rtol)
 }
 
 template <typename DAEParams, typename Scalar>
-void IDASolver<DAEParams, Scalar>::set_initial_state(const std::vector<realtype>& x0)
+void IDASolver<DAEParams, Scalar>::set_initial_state(const std::vector<realtype>& x0, const std::vector<realtype>& u0)
 {
+    u = u0;
+
     realtype* yptr = N_VGetArrayPointer(yy_);
 
     for (size_t i = 0; i < N_; i++) {
@@ -165,7 +183,7 @@ void IDASolver<DAEParams, Scalar>::set_initial_state(const std::vector<realtype>
     std::vector<realtype> y_0(x0.begin(), x0.begin() + num_diffeq_);
     std::vector<realtype> z_0(x0.begin() + num_diffeq_, x0.end());
 
-    auto yp_0 = f_(params_, y_0, z_0);
+    auto yp_0 = f_(params_, y_0, z_0, u0);
     yp_0.insert(std::end(yp_0), std::cbegin(z_0), std::cend(z_0));
     yptr = N_VGetArrayPointer(yp_);
     std::copy(std::cbegin(yp_0), std::cend(yp_0), yptr);
@@ -178,24 +196,26 @@ void IDASolver<DAEParams, Scalar>::start(realtype t0, realtype first_step, bool 
     IDAInit(mem_, &IDASolver<DAEParams, Scalar>::fres, t0, yy_, yp_);
     IDASVtolerances(mem_, rtol_, avtol_);
 
-    std::vector< AD<realtype> > X(N_);
+    std::vector< AD<realtype> > X(N_ + num_inputs_);
     CppAD::Independent(X);
 
     auto x = std::vector< AD<realtype> >(X.begin(), X.begin() + num_diffeq_);
     auto z = std::vector< AD<realtype> >(X.begin() + num_diffeq_, X.begin() + N_);
-    auto y = f_sym(params_, x, z);
-    auto z_res = g_sym(params_, x, z);
+    auto u = std::vector< AD<realtype> >(X.begin() + N_, X.end());
+    auto y = f_sym(params_, x, z, u);
+    auto z_res = g_sym(params_, x, z, u);
     auto Y = std::vector< AD<realtype> >(y);
     Y.insert(std::end(Y), z_res.cbegin(), z_res.cend());
-
     UserData_.F = CppAD::ADFun<realtype>{X, Y};
     UserData_.F.optimize();
     UserData_.f = f_;
     UserData_.g = g_;
     UserData_.params = params_;
+    UserData_.inputs = &this->u;
     UserData_.n = num_diffeq_;
     UserData_.m = num_algeq_;
     UserData_.p = num_algvar_;
+    UserData_.q = num_inputs_;
 
     IDASetUserData(mem_, &UserData_);
     IDASetLinearSolver(mem_, LS_, ls_matrix_);
@@ -229,26 +249,35 @@ int IDASolver<DAEParams, Scalar>::do_step(realtype step, realtype& tret)
 }
 
 template <typename DAEParams, typename Scalar>
+void IDASolver<DAEParams, Scalar>::get_state(std::vector<realtype>& x, std::vector<realtype>& z) const
+{
+    realtype* yptr = N_VGetArrayPointer(yy_);
+
+    x.assign(yptr, yptr + num_diffeq_);
+    z.assign(yptr + num_diffeq_, yptr + N_);
+}
+
+template <typename DAEParams, typename Scalar>
 int IDASolver<DAEParams, Scalar>::fres(realtype tres, N_Vector yy, N_Vector yp, N_Vector rr, void* user_data)
 {
-    auto u = (IDAUserData*)user_data;
+    auto udata = (IDAUserData*)user_data;
     Scalar *yval, *ypval, *rval;
 
     yval = N_VGetArrayPointer(yy);
     ypval = N_VGetArrayPointer(yp);
     rval = N_VGetArrayPointer(rr);
 
-    std::vector<Scalar> x{yval, yval + u->n};
-    std::vector<Scalar> z{yval + u->n, yval + (u->n + u->p)};
-    std::vector<Scalar> fval = u->f(u->params, x, z);
-    std::vector<Scalar> g_res = u->g(u->params, x, z);
+    std::vector<Scalar> x{yval, yval + udata->n};
+    std::vector<Scalar> z{yval + udata->n, yval + (udata->n + udata->p)};
+    std::vector<Scalar> fval = udata->f(udata->params, x, z, *udata->inputs);
+    std::vector<Scalar> g_res = udata->g(udata->params, x, z, *udata->inputs);
 
-    for (int i = 0; i < u->n; i++) {
+    for (int i = 0; i < udata->n; i++) {
         rval[i] = ypval[i] - fval[i];
     }
 
-    for (int i = 0; i < u->m; i++) {
-        rval[u->n + i] = g_res[i];
+    for (int i = 0; i < udata->m; i++) {
+        rval[udata->n + i] = g_res[i];
     }
 
     return 0;
@@ -281,28 +310,33 @@ int IDASolver<DAEParams, Scalar>::jacfresCSR(realtype tt,  realtype cj,
 
     SUNMatZero(JJ);
 
-    int N = u->n + u->p;
+    int N = u->n + u->p + u->q;
     int M = u->n + u->m;
-    std::vector<realtype> X(yval, yval + N);
+    std::vector<realtype> X(yval, yval + (u->n + u->p));
+    X.insert(X.end(), u->inputs->begin(), u->inputs->end()); // evaluate Jacobian using current inputs
     // augment
     auto jac = u->F.Jacobian(X);
 
+    int JacN = N - u->q;
     for (int i = 0; i <= M; i++) {
-        rowptrs[i] = i * M;
+        rowptrs[i] = i * JacN;
     }
 
     // jacobian of f
     for (int i = 0; i < M; i++) {
-        for (int j = 0; j < N; j++) {
-            data[N * i + j] = jac[N * i + j];
-            if (i < u->n && i == j) data[N * i + j] += cj;
-            colvals[N * i + j] = j;
-          }
+        for (int j = 0; j < JacN; j++) {
+            data[JacN * i + j] = jac[N * i + j];
+            if (i < u->n and i == j) {
+                data[JacN * i + j] += cj;
+            }
+            colvals[JacN * i + j] = j;
+        }
     }
 
     //static bool first = true;
     //if (first) {
     //    for (size_t i = 0; i < jac.size(); i++) {
+    //        if ((i % N) == 0 and i > 0) std::cout << std::endl;
     //        std::cout << jac[i] << " ";
     //    }
     //    std::cout << std::endl;
