@@ -13,8 +13,3 @@ nocturlabe_dep = declare_dependency(
   include_directories : include_directories('/usr/include/suitesparse/', '.'),
   dependencies : [sundials_ida, sundials_nvecserial, sundials_nvecmanyvector, klu, sundials_sunlinsolklu, cppad],
 )
-
-#pkg = import('pkgconfig')
-#pkg.generate(
-#    name: 'nocturlabe',
-#    version: '0.1')
