@@ -13,7 +13,7 @@
 
 #include <cppad/cppad.hpp>
 
-namespace nocturlabe 
+namespace astrolabio 
 {
 
 using CppAD::AD;
